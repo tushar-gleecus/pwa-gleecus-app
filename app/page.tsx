@@ -1,8 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import supabase from '../utils/supabaseClient';
+import { v4 as uuidv4 } from 'uuid';
 
 type UploadFile = {
   file: File;
@@ -13,7 +14,28 @@ type UploadFile = {
 
 export default function Home() {
   const [uploads, setUploads] = useState<UploadFile[]>([]);
+  const [isOnline, setIsOnline] = useState(true);
   const router = useRouter();
+
+  useEffect(() => {
+    setIsOnline(navigator.onLine);
+    const handleOnline = () => {
+      setIsOnline(true);
+      alert('Back online. Attempting to sync.');
+      handleSubmit();
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      alert('You are offline. Uploads will sync once you reconnect.');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   const handleUpload = async (files: File[]) => {
     const newUploads: UploadFile[] = files.map((file) => ({
@@ -21,13 +43,11 @@ export default function Home() {
       progress: 0,
       status: 'uploading',
     }));
-
     setUploads((prev) => [...prev, ...newUploads]);
 
     for (let i = 0; i < newUploads.length; i++) {
       const filePath = `${Date.now()}_${newUploads[i].file.name}`;
       const { error } = await supabase.storage.from('images').upload(filePath, newUploads[i].file);
-
       if (error) {
         newUploads[i].status = 'error';
       } else {
@@ -36,8 +56,7 @@ export default function Home() {
         newUploads[i].url = data.publicUrl;
         newUploads[i].progress = 100;
       }
-
-      setUploads((prev) => [...prev]);
+      setUploads([...newUploads]);
     }
   };
 
@@ -48,29 +67,67 @@ export default function Home() {
     }
   };
 
-  const handleDelete = (index: number) => {
-    setUploads((prev) => prev.filter((_, i) => i !== index));
+  const saveToIndexedDB = async (upload: UploadFile) => {
+    const db = await openDB();
+    const tx = db.transaction('uploads', 'readwrite');
+    const store = tx.objectStore('uploads');
+    await store.put({
+      id: uuidv4(),
+      url: upload.url,
+      created_at: new Date().toISOString(),
+    });
   };
 
-  const handleClear = () => {
-    setUploads([]);
+  const openDB = () => {
+    return new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('upload-store', 1);
+      request.onupgradeneeded = () => {
+        request.result.createObjectStore('uploads', { keyPath: 'id' });
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
   };
 
   const handleSubmit = async () => {
     const successful = uploads.filter((u) => u.status === 'done');
     if (successful.length === 0) return;
 
-    await Promise.all(successful.map((upload) =>
-      supabase.from('submissions').insert({
-        text: '',
-        image_url: upload.url!,
-        synced: true,
-        created_at: new Date().toISOString(),
-      })
-    ));
+    if (!isOnline) {
+      for (const upload of successful) {
+        await saveToIndexedDB(upload);
+      }
+      if ('serviceWorker' in navigator && 'SyncManager' in window) {
+        const reg = await navigator.serviceWorker.ready;
+        // @ts-expect-error: sync is not yet in TS types
+        await reg.sync?.register('sync-uploads');
+        alert('Offline: Uploads will sync once back online.');
+      }
+      return;
+    }
 
-    setUploads([]);
-    router.push('/history');
+    try {
+      await Promise.all(
+        successful.map((upload) =>
+          supabase.from('submissions').insert({
+            text: '',
+            image_url: upload.url!,
+            synced: true,
+            created_at: new Date().toISOString(),
+          })
+        )
+      );
+      setUploads([]);
+      router.push('/history');
+    } catch (error) {
+      console.log(error);
+      setUploads((prev) =>
+        prev.map((upload) =>
+          upload.status === 'done' ? { ...upload, synced: false } : upload
+        )
+      );
+      alert('Submission failed. Will retry when online.');
+    }
   };
 
   return (
@@ -98,13 +155,13 @@ export default function Home() {
                   </div>
                   <div className="flex items-center gap-3">
                     {upload.status === 'done' && <span className="text-green-400 text-sm">✔</span>}
-                    <button onClick={() => handleDelete(idx)} className="text-red-400 text-sm hover:underline">Remove</button>
+                    <button onClick={() => setUploads(uploads.filter((_, i) => i !== idx))} className="text-red-400 text-sm hover:underline">Remove</button>
                   </div>
                 </div>
               ))}
               <div className="flex justify-between items-center">
-                <button onClick={handleClear} className="text-sm text-slate-300 hover:text-white">Clear All</button>
-                <button onClick={handleSubmit} className="button">
+                <button onClick={() => setUploads([])} className="text-sm text-slate-300 hover:text-white">Clear All</button>
+                <button onClick={handleSubmit} className="button" disabled={!isOnline}>
                   Submit
                   <svg fill="currentColor" viewBox="0 0 24 24" className="icon">
                     <path d="M13.172 12l-4.95-4.95 1.414-1.414L16 12l-6.364 6.364-1.414-1.414z" />
@@ -115,9 +172,6 @@ export default function Home() {
           )}
         </div>
       </div>
-      <footer className="text-center text-white py-4 bg-black">
-        © 2025 My PWA App
-      </footer>
     </div>
   );
 }

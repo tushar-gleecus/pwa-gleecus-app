@@ -1,7 +1,17 @@
 'use client';
-import { ReactNode } from 'react';
+import { ReactNode, useEffect } from 'react';
 
 export default function AppLayoutClient({ children }: { children: ReactNode }) {
+  // ✅ Register service worker once
+  useEffect(() => {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker
+        .register('/sw.js')
+        .then(() => console.log('✅ Service Worker registered'))
+        .catch((err) => console.error('❌ SW registration failed:', err));
+    }
+  }, []);
+
   return (
     <>
       <header className="app-header bg-slate-950 text-white shadow-md px-4 py-3 flex items-center justify-between">
